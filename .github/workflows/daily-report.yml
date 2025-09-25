@@ -56,8 +56,10 @@ jobs:
               continue
             fi
             
-            # 各リポジトリのコミットをチェック
-            echo "$repos_response" | jq -r '.[] | "\(.full_name)|\(.private)"' | while IFS='|' read -r repo_name is_private; do
+            # APIレスポンスが配列でない場合は、エラーメッセージが返されている可能性がある
+            if [ "$(echo "$repos_response" | jq -e '. | type' 2>/dev/null)" = "\"array\"" ]; then
+              # 各リポジトリのコミットをチェック
+              echo "$repos_response" | jq -r '.[] | "\(.full_name)|\(.private)"' | while IFS='|' read -r repo_name is_private; do
               echo "Checking commits for $repo_name..."
               
               # 今日のコミットを取得
@@ -111,7 +113,8 @@ jobs:
                 continue
               fi
               
-              echo "$org_repos_response" | jq -r '.[] | "\(.full_name)|\(.private)"' | while IFS='|' read -r repo_name is_private; do
+              if [ "$(echo "$org_repos_response" | jq -e '. | type' 2>/dev/null)" = "\"array\"" ]; then
+                echo "$org_repos_response" | jq -r '.[] | "\(.full_name)|\(.private)"' | while IFS='|' read -r repo_name is_private; do
                 echo "Checking commits for $repo_name..."
                 
                 commits_response=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
@@ -122,17 +125,23 @@ jobs:
                   
                   if [ "$commit_count" -gt 0 ]; then
                     if [ "$is_private" = "true" ]; then
-                      echo "## 🔒 $repo_name (Private)" >> all-repos-summary.md
+                      echo "## 🔒 $repo_name (Private)" >> $REPORT_FILE
                     else
-                      echo "## 📁 $repo_name (Public)" >> all-repos-summary.md
+                      echo "## 📁 $repo_name (Public)" >> $REPORT_FILE
                     fi
-                    echo "" >> all-repos-summary.md
+                    echo "" >> $REPORT_FILE
                     
-                    echo "$commits_response" | jq -r '.[] | "- **\(.sha[0:7])** \(.commit.message | split("\n")[0]) (\(.commit.author.name) - \(.commit.author.date | split("T")[0]))"' >> all-repos-summary.md
-                    echo "" >> all-repos-summary.md
+                    echo "$commits_response" | jq -r '.[] | "- **\(.sha[0:7])** \(.commit.message | split("\n")[0]) (\(.commit.author.name) - \(.commit.author.date | split("T")[0]))"' >> $REPORT_FILE
+                    echo "" >> $REPORT_FILE
                   fi
                 fi
-              done
+                done
+              else
+                echo "Error fetching organization repositories: $org_repos_response"
+              fi
+            else
+              echo "Error fetching repositories: $repos_response"
+            fi
               
               org_page=$((org_page + 1))
               
@@ -143,8 +152,8 @@ jobs:
           done
           
           # コミットが見つからなかった場合の処理
-          if [ $(wc -l < all-repos-summary.md) -le 2 ]; then
-            echo "今日はどのリポジトリにもコミットがありませんでした。" >> all-repos-summary.md
+          if [ -f "$REPORT_FILE" ] && [ $(wc -l < "$REPORT_FILE") -le 2 ]; then
+            echo "今日はどのリポジトリにもコミットがありませんでした。" >> $REPORT_FILE
           fi
 
       - name: Create summary statistics
