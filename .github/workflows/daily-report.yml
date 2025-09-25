@@ -1,0 +1,220 @@
+name: All Repositories Commit Summary
+
+on:
+  schedule:
+    # 毎日午前9時（UTC）に実行
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+
+jobs:
+  generate-summary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Generate all repositories summary
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TODAY=$(date +%Y-%m-%d)
+          YEAR=$(date +%Y)
+          
+          # ディレクトリを作成
+          mkdir -p daily-report/$YEAR
+          
+          # 日報ファイルのパス
+          REPORT_FILE="daily-report/$YEAR/$TODAY.md"
+          
+          echo "# All Repositories Commit Summary - $TODAY" > $REPORT_FILE
+          echo "" >> $REPORT_FILE
+          
+          # ユーザーがアクセス可能な全リポジトリを取得
+          page=1
+          has_more=true
+          
+          while [ "$has_more" = true ]; do
+            echo "Fetching repositories page $page..."
+            
+            # 自分のリポジトリとオーガナイゼーションのリポジトリを取得
+            repos_response=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+              "https://api.github.com/user/repos?type=all&sort=updated&per_page=100&page=$page")
+            
+            # レスポンスが空配列かチェック
+            if [ "$(echo "$repos_response" | jq '. | length')" -eq 0 ]; then
+              has_more=false
+              continue
+            fi
+            
+            # 各リポジトリのコミットをチェック
+            echo "$repos_response" | jq -r '.[] | "\(.full_name)|\(.private)"' | while IFS='|' read -r repo_name is_private; do
+              echo "Checking commits for $repo_name..."
+              
+              # 今日のコミットを取得
+              commits_response=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+                "https://api.github.com/repos/$repo_name/commits?since=${TODAY}T00:00:00Z&until=${TODAY}T23:59:59Z" 2>/dev/null)
+              
+              # APIエラーをチェック
+              if [ $? -eq 0 ] && [ "$(echo "$commits_response" | jq -e '. | type' 2>/dev/null)" = "\"array\"" ]; then
+                commit_count=$(echo "$commits_response" | jq '. | length')
+                
+                if [ "$commit_count" -gt 0 ]; then
+                  # リポジトリ名とプライベート情報を出力
+                  if [ "$is_private" = "true" ]; then
+                    echo "## 🔒 $repo_name (Private)" >> all-repos-summary.md
+                  else
+                    echo "## 📁 $repo_name (Public)" >> all-repos-summary.md
+                  fi
+                  echo "" >> all-repos-summary.md
+                  
+                  # コミット情報を整形して出力
+                  echo "$commits_response" | jq -r '.[] | "- **\(.sha[0:7])** \(.commit.message | split("\n")[0]) (\(.commit.author.name) - \(.commit.author.date | split("T")[0]))"' >> all-repos-summary.md
+                  echo "" >> all-repos-summary.md
+                fi
+              fi
+            done
+            
+            page=$((page + 1))
+            
+            # 次のページがあるかチェック
+            if [ "$(echo "$repos_response" | jq '. | length')" -lt 100 ]; then
+              has_more=false
+            fi
+          done
+          
+          # オーガナイゼーションのリポジトリも取得
+          orgs_response=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/user/orgs")
+          
+          echo "$orgs_response" | jq -r '.[].login' | while read -r org_name; do
+            echo "Checking organization: $org_name"
+            
+            org_page=1
+            org_has_more=true
+            
+            while [ "$org_has_more" = true ]; do
+              org_repos_response=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+                "https://api.github.com/orgs/$org_name/repos?type=all&per_page=100&page=$org_page")
+              
+              if [ "$(echo "$org_repos_response" | jq '. | length')" -eq 0 ]; then
+                org_has_more=false
+                continue
+              fi
+              
+              echo "$org_repos_response" | jq -r '.[] | "\(.full_name)|\(.private)"' | while IFS='|' read -r repo_name is_private; do
+                echo "Checking commits for $repo_name..."
+                
+                commits_response=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+                  "https://api.github.com/repos/$repo_name/commits?since=${TODAY}T00:00:00Z&until=${TODAY}T23:59:59Z" 2>/dev/null)
+                
+                if [ $? -eq 0 ] && [ "$(echo "$commits_response" | jq -e '. | type' 2>/dev/null)" = "\"array\"" ]; then
+                  commit_count=$(echo "$commits_response" | jq '. | length')
+                  
+                  if [ "$commit_count" -gt 0 ]; then
+                    if [ "$is_private" = "true" ]; then
+                      echo "## 🔒 $repo_name (Private)" >> all-repos-summary.md
+                    else
+                      echo "## 📁 $repo_name (Public)" >> all-repos-summary.md
+                    fi
+                    echo "" >> all-repos-summary.md
+                    
+                    echo "$commits_response" | jq -r '.[] | "- **\(.sha[0:7])** \(.commit.message | split("\n")[0]) (\(.commit.author.name) - \(.commit.author.date | split("T")[0]))"' >> all-repos-summary.md
+                    echo "" >> all-repos-summary.md
+                  fi
+                fi
+              done
+              
+              org_page=$((org_page + 1))
+              
+              if [ "$(echo "$org_repos_response" | jq '. | length')" -lt 100 ]; then
+                org_has_more=false
+              fi
+            done
+          done
+          
+          # コミットが見つからなかった場合の処理
+          if [ $(wc -l < all-repos-summary.md) -le 2 ]; then
+            echo "今日はどのリポジトリにもコミットがありませんでした。" >> all-repos-summary.md
+          fi
+
+      - name: Create summary statistics
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 統計情報をファイルの先頭に追加
+          TODAY=$(date +%Y-%m-%d)
+          YEAR=$(date +%Y)
+          REPORT_FILE="daily-report/$YEAR/$TODAY.md"
+          
+          TOTAL_REPOS=$(grep -c "^## " $REPORT_FILE || echo "0")
+          TOTAL_COMMITS=$(grep -c "^- \*\*" $REPORT_FILE || echo "0")
+          
+          # 一時ファイルに統計を書き込み
+          echo "# All Repositories Commit Summary - $TODAY" > temp-summary.md
+          echo "" >> temp-summary.md
+          echo "## 📊 Statistics" >> temp-summary.md
+          echo "- **Total repositories with commits:** $TOTAL_REPOS" >> temp-summary.md
+          echo "- **Total commits:** $TOTAL_COMMITS" >> temp-summary.md
+          echo "" >> temp-summary.md
+          echo "---" >> temp-summary.md
+          echo "" >> temp-summary.md
+          
+          # 既存の内容を統計の後に追加
+          tail -n +3 $REPORT_FILE >> temp-summary.md
+          
+          # ファイルを置き換え
+          mv temp-summary.md $REPORT_FILE
+
+      - name: Commit and push changes
+        run: |
+          TODAY=$(date +%Y-%m-%d)
+          YEAR=$(date +%Y)
+          REPORT_FILE="daily-report/$YEAR/$TODAY.md"
+          
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          
+          # ファイルが存在し、変更がある場合のみコミット
+          if [ -f "$REPORT_FILE" ]; then
+            git add "$REPORT_FILE"
+            if ! git diff --cached --quiet; then
+              git commit -m "Add daily commit summary for $TODAY"
+              git push
+            else
+              echo "No changes to commit"
+            fi
+          fi
+
+      - name: Create Issue with summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const today = new Date().toISOString().split('T')[0];
+            const year = new Date().getFullYear();
+            const reportFile = `daily-report/${year}/${today}.md`;
+            
+            if (fs.existsSync(reportFile)) {
+              const content = fs.readFileSync(reportFile, 'utf8');
+              
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `📈 Daily Commit Summary - ${today}`,
+                body: content,
+                labels: ['daily-summary', 'automated']
+              });
+            }
+
+      - name: Upload summary as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-commit-summary-${{ github.run_id }}
+          path: daily-report/
